@@ -20,6 +20,8 @@ from PySide6.QtWidgets import (
     QTextEdit,
     QVBoxLayout,
     QWidget,
+    QProgressBar,
+    QDialog,  # Added
 )
 
 
@@ -50,16 +52,34 @@ project = resolve.GetProjectManager().GetCurrentProject()
 media_pool = project.GetMediaPool()
 
 
+class ProgressDialog(QDialog):
+    def __init__(self, maximum, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Importing Sequences...")
+        self.setModal(True)
+        self.setFixedSize(400, 80)
+        layout = QVBoxLayout(self)
+        self.progress = QProgressBar(self)
+        self.progress.setMinimum(0)
+        self.progress.setMaximum(maximum)
+        self.progress.setValue(0)
+        self.progress.setTextVisible(True)
+        layout.addWidget(self.progress)
+        self.setLayout(layout)
+
+    def setValue(self, value):
+        self.progress.setValue(value)
+        QApplication.processEvents()
+
+
 class ShotLoaderPanel(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Shot Loader")
         self.resize(980, 620)
-
         self.root_path = DEFAULT_ROOT if os.path.isdir(DEFAULT_ROOT) else ""
         self.row_data = {}
         self.row_counter = 0
-
         self._build_ui()
         if self.root_path:
             self.populate_tree()
@@ -67,26 +87,19 @@ class ShotLoaderPanel(QWidget):
     def _build_ui(self):
         root_layout = QVBoxLayout()
         toolbar = QHBoxLayout()
-
         self.browse_btn = QPushButton("Select Folder")
         self.browse_btn.clicked.connect(self.select_folder)
-
         self.refresh_btn = QPushButton("Refresh")
         self.refresh_btn.clicked.connect(self.populate_tree)
-
         self.import_btn = QPushButton("Import All Sequences && Create Timeline")
         self.import_btn.clicked.connect(self.import_all_and_create_timeline)
-
         self.path_label = QLabel(self.root_path or "No folder selected")
         self.path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-
         toolbar.addWidget(self.browse_btn)
         toolbar.addWidget(self.refresh_btn)
         toolbar.addWidget(self.import_btn)
         toolbar.addWidget(self.path_label, 1)
-
         content = QHBoxLayout()
-
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["Sequence", "Frames", "Range", "Ext"])
         self.tree.setAlternatingRowColors(True)
@@ -96,26 +109,21 @@ class ShotLoaderPanel(QWidget):
         self.tree.setColumnWidth(1, 80)
         self.tree.setColumnWidth(2, 120)
         self.tree.setColumnWidth(3, 60)
-
         right_col = QVBoxLayout()
         self.preview = QLabel("Select a sequence")
         self.preview.setAlignment(Qt.AlignCenter)
         self.preview.setMinimumSize(320, 220)
         self.preview.setStyleSheet("border:1px solid #666; background:#1e1e1e;")
-
         self.meta = QTextEdit()
         self.meta.setReadOnly(True)
         self.meta.setPlaceholderText("Metadata will appear here")
-
         self.status = QLabel("Ready")
-
+        self.progress = None  # Remove inline progress bar
         right_col.addWidget(self.preview)
         right_col.addWidget(self.meta, 1)
         right_col.addWidget(self.status)
-
         content.addWidget(self.tree, 3)
         content.addLayout(right_col, 2)
-
         root_layout.addLayout(toolbar)
         root_layout.addLayout(content, 1)
         self.setLayout(root_layout)
@@ -269,44 +277,39 @@ class ShotLoaderPanel(QWidget):
         if total == 0:
             self.status.setText("Nothing to import")
             return
-
         self.status.setText("Importing...")
-
+        progress_dialog = ProgressDialog(total, self)
+        progress_dialog.show()
         before_ids, _before_clips = self.snapshot_pool()
         imported_clips = []
         imported_clip_ids = set()
-
         for i in range(total):
             item = self.tree.topLevelItem(i)
             row_id = item.data(0, Qt.UserRole)
             seq = self.row_data.get(row_id)
             if not seq:
                 continue
-
             clips = self.import_sequence_item(seq)
             for clip in clips:
                 uid = self.clip_uid(clip)
                 if uid not in imported_clip_ids:
                     imported_clip_ids.add(uid)
                     imported_clips.append(clip)
-
+            progress_dialog.setValue(i + 1)
         if not imported_clips:
-            # Resolve sometimes imports but returns empty list; detect by pool diff.
             after_ids, after_clips = self.snapshot_pool()
             new_ids = after_ids - before_ids
             for clip in after_clips:
                 uid = self.clip_uid(clip)
                 if uid in new_ids:
                     imported_clips.append(clip)
-
         if not imported_clips:
             self.status.setText("Import failed")
+            progress_dialog.close()
             return
-
         timeline_base = "{}_Timeline".format(Path(self.root_path).name or "Shots")
         timeline_name = timeline_base
         timeline = None
-
         for idx in range(0, 100):
             try_name = timeline_name if idx == 0 else "{}_{}".format(timeline_base, idx + 1)
             try:
@@ -316,21 +319,21 @@ class ShotLoaderPanel(QWidget):
             if timeline:
                 timeline_name = try_name
                 break
-
         if not timeline:
             self.status.setText("Imported {} clips, timeline creation failed".format(len(imported_clips)))
+            progress_dialog.close()
             return
-
         try:
             appended = media_pool.AppendToTimeline(imported_clips)
         except Exception as exc:
             print("[Shot Loader] AppendToTimeline error: {}".format(exc))
             appended = False
-
         if appended:
             self.status.setText("Timeline '{}' created with {} clips".format(timeline_name, len(imported_clips)))
         else:
             self.status.setText("Timeline created, append failed")
+        progress_dialog.setValue(total)
+        progress_dialog.close()
 
     def on_tree_selection(self):
         selected = self.tree.selectedItems()
